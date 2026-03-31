@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Teen Safety Auditor</title>
+
+  <!-- TailwindCSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- HTMX -->
+  <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2uQ8DKaVobFUMFNFwELJQ5oGh56Rd3bPXB" crossorigin="anonymous"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            safe: { 50: '#f0fdf4', 100: '#dcfce7', 200: '#bbf7d0', 500: '#22c55e', 700: '#15803d' },
+            caution: { 50: '#fefce8', 100: '#fef9c3', 200: '#fef08a', 500: '#eab308', 700: '#a16207' },
+            violation: { 50: '#fff1f2', 100: '#ffe4e6', 200: '#fecdd3', 500: '#ef4444', 700: '#b91c1c' },
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator { display: flex; }
+    .htmx-request.htmx-indicator { display: flex; }
+    .tab-btn.active {
+      border-bottom-color: #6366f1;
+      color: #6366f1;
+      font-weight: 600;
+    }
+    .risk-safe    { background-color: #dcfce7; color: #15803d; border-color: #bbf7d0; }
+    .risk-caution { background-color: #fef9c3; color: #a16207; border-color: #fef08a; }
+    .risk-violation { background-color: #ffe4e6; color: #b91c1c; border-color: #fecdd3; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeIn 0.25s ease-out; }
+
+    /* Scrollbar polish */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+  </style>
+</head>
+
+<body class="h-full bg-slate-50 text-slate-800 flex flex-col">
+
+  <!-- ===== HEADER ===== -->
+  <header class="bg-indigo-700 text-white shadow-md">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <!-- Shield icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-indigo-200" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+        <div>
+          <h1 class="text-xl font-bold tracking-tight">Teen Safety Auditor</h1>
+          <p class="text-indigo-200 text-xs">Test AI prompts against OpenAI teen safety policies</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-4">
+        {% if not engine_ready %}
+        <span class="inline-flex items-center gap-1.5 bg-red-500 text-white text-xs font-medium px-2.5 py-1 rounded-full">
+          <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+          Engine offline — set OPENAI_API_KEY
+        </span>
+        {% else %}
+        <span class="inline-flex items-center gap-1.5 bg-green-500 text-white text-xs font-medium px-2.5 py-1 rounded-full">
+          <span class="h-1.5 w-1.5 rounded-full bg-white animate-pulse"></span>
+          Engine ready
+        </span>
+        {% endif %}
+        <span class="text-indigo-300 text-xs">v{{ version }}</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== MAIN ===== -->
+  <main class="flex-1 max-w-6xl w-full mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+    <!-- ───── LEFT PANEL: Input ───── -->
+    <section class="flex flex-col gap-6">
+
+      <!-- Tab switcher -->
+      <div class="flex border-b border-slate-200" role="tablist" aria-label="Audit mode">
+        <button
+          id="tab-single"
+          role="tab"
+          aria-selected="true"
+          aria-controls="panel-single"
+          class="tab-btn active px-5 py-2.5 text-sm border-b-2 border-transparent transition-colors"
+          onclick="switchTab('single')"
+        >Single Prompt</button>
+        <button
+          id="tab-conversation"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-conversation"
+          class="tab-btn px-5 py-2.5 text-sm border-b-2 border-transparent text-slate-500 transition-colors"
+          onclick="switchTab('conversation')"
+        >Conversation</button>
+      </div>
+
+      <!-- ── Single Prompt Panel ── -->
+      <div id="panel-single" role="tabpanel" aria-labelledby="tab-single">
+        <form
+          id="form-single"
+          hx-post="/htmx/audit/prompt"
+          hx-target="#results-panel"
+          hx-swap="innerHTML"
+          hx-indicator="#spinner-single"
+          class="flex flex-col gap-4"
+          novalidate
+        >
+          <div class="flex flex-col gap-1.5">
+            <label for="prompt" class="text-sm font-medium text-slate-700">
+              User Prompt <span class="text-red-500">*</span>
+            </label>
+            <textarea
+              id="prompt"
+              name="prompt"
+              rows="5"
+              required
+              placeholder="Paste the user prompt or message you want to evaluate…"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm
+                     focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-y
+                     placeholder-slate-400 transition"
+            ></textarea>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <label for="response" class="text-sm font-medium text-slate-700">
+              AI Response
+              <span class="text-slate-400 font-normal">(optional)</span>
+            </label>
+            <textarea
+              id="response"
+              name="response"
+              rows="4"
+              placeholder="Paste the AI-generated response to evaluate alongside the prompt…"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm
+                     focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 resize-y
+                     placeholder-slate-400 transition"
+            ></textarea>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button
+              type="submit"
+              class="flex-1 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                     text-white font-semibold rounded-lg px-5 py-2.5 text-sm
+                     transition shadow-sm focus:outline-none focus:ring-2
+                     focus:ring-indigo-500 focus:ring-offset-2"
+            >Audit Prompt</button>
+            <button
+              type="button"
+              onclick="clearSingleForm()"
+              class="px-4 py-2.5 text-sm font-medium text-slate-600 border border-slate-300
+                     rounded-lg hover:bg-slate-100 transition"
+            >Clear</button>
+          </div>
+
+          <!-- Spinner -->
+          <div id="spinner-single" class="htmx-indicator items-center justify-center gap-2 text-indigo-600 text-sm py-2">
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+            </svg>
+            Analysing prompt…
+          </div>
+        </form>
+      </div>
+
+      <!-- ── Conversation Panel ── -->
+      <div id="panel-conversation" role="tabpanel" aria-labelledby="tab-conversation" class="hidden">
+        <form
+          id="form-conversation"
+          hx-post="/htmx/audit/conversation"
+          hx-target="#results-panel"
+          hx-swap="innerHTML"
+          hx-indicator="#spinner-conv"
+          class="flex flex-col gap-4"
+          novalidate
+        >
+          <div class="flex flex-col gap-1.5">
+            <label for="conversation" class="text-sm font-medium text-slate-700">
+              Conversation JSON <span class="text-red-500">*</span>
+            </label>
+            <p class="text-xs text-slate-500">
+              Paste a JSON array of message objects using OpenAI chat format
+              (<code class="bg-slate-100 px-1 rounded">role</code> + <code class="bg-slate-100 px-1 rounded">content</code>).
+            </p>
+            <textarea
+              id="conversation"
+              name="conversation"
+              rows="10"
+              required
+              spellcheck="false"
+              placeholder='[\n  { "role": "user",      "content": "Tell me about online safety." },\n  { "role": "assistant", "content": "Sure! Here are some tips…" }\n]'
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm
+                     font-mono shadow-sm focus:border-indigo-500 focus:ring-1
+                     focus:ring-indigo-500 resize-y placeholder-slate-400 transition"
+            ></textarea>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap">
+            <button
+              type="submit"
+              class="flex-1 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                     text-white font-semibold rounded-lg px-5 py-2.5 text-sm
+                     transition shadow-sm focus:outline-none focus:ring-2
+                     focus:ring-indigo-500 focus:ring-offset-2"
+            >Audit Conversation</button>
+            <button
+              type="button"
+              onclick="loadExample()"
+              class="px-4 py-2.5 text-sm font-medium text-indigo-600 border border-indigo-300
+                     rounded-lg hover:bg-indigo-50 transition"
+            >Load Example</button>
+            <button
+              type="button"
+              onclick="clearConvForm()"
+              class="px-4 py-2.5 text-sm font-medium text-slate-600 border border-slate-300
+                     rounded-lg hover:bg-slate-100 transition"
+            >Clear</button>
+          </div>
+
+          <!-- Download report button (shown after a conversation audit succeeds) -->
+          <button
+            id="btn-download-report"
+            type="button"
+            onclick="downloadReport()"
+            class="hidden w-full border border-emerald-500 text-emerald-700 bg-emerald-50
+                   hover:bg-emerald-100 font-semibold rounded-lg px-5 py-2.5 text-sm
+                   transition focus:outline-none focus:ring-2 focus:ring-emerald-400"
+          >
+            ⬇ Download Audit Report (JSON)
+          </button>
+
+          <!-- Spinner -->
+          <div id="spinner-conv" class="htmx-indicator items-center justify-center gap-2 text-indigo-600 text-sm py-2">
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+            </svg>
+            Analysing conversation…
+          </div>
+        </form>
+      </div>
+
+      <!-- Policy reference card -->
+      <aside class="rounded-lg border border-slate-200 bg-white p-4 text-xs text-slate-500 shadow-sm">
+        <p class="font-semibold text-slate-600 mb-1">Policy Categories Evaluated</p>
+        <ul class="grid grid-cols-2 gap-x-4 gap-y-1 list-none">
+          <li>🔞 Sexual Content</li>
+          <li>🩸 Self-Harm</li>
+          <li>🕵️ Grooming</li>
+          <li>💢 Violence</li>
+          <li>⚠️ Dangerous Activities</li>
+          <li>💊 Substance Abuse</li>
+          <li>🔒 Privacy Violation</li>
+          <li>🚫 Hate Speech</li>
+        </ul>
+        <p class="mt-2">
+          <a href="https://openai.com/policies/usage-policies#child-safety"
+             target="_blank" rel="noopener noreferrer"
+             class="text-indigo-500 hover:underline">OpenAI Teen Safety Policy ↗</a>
+        </p>
+      </aside>
+    </section>
+
+    <!-- ───── RIGHT PANEL: Results ───── -->
+    <section class="flex flex-col gap-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold text-slate-700">Audit Results</h2>
+        <button
+          id="btn-copy-results"
+          type="button"
+          onclick="copyResults()"
+          class="hidden text-xs text-slate-500 hover:text-slate-700 border border-slate-200
+                 bg-white px-3 py-1.5 rounded-lg transition"
+        >Copy JSON</button>
+      </div>
+
+      <!-- Results target — HTMX injects partials here -->
+      <div
+        id="results-panel"
+        class="flex-1 min-h-[400px] rounded-xl border border-slate-200 bg-white shadow-sm
+               overflow-y-auto p-4"
+      >
+        <!-- Empty state -->
+        <div class="h-full flex flex-col items-center justify-center text-slate-400 gap-3 py-12">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-slate-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+          <p class="text-sm">Run an audit to see compliance results here.</p>
+          <p class="text-xs text-slate-300">No data is stored server-side.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="border-t border-slate-200 bg-white">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between text-xs text-slate-400">
+      <span>Teen Safety Auditor v{{ version }} — Zero-persistence design</span>
+      <a href="https://openai.com/policies/usage-policies" target="_blank" rel="noopener noreferrer"
+         class="hover:text-indigo-500 transition">OpenAI Usage Policies ↗</a>
+    </div>
+  </footer>
+
+  <!-- app.js -->
+  <script src="/static/app.js"></script>
+
+  <script>
+    // ── Tab switching ──────────────────────────────────────────────────────
+    function switchTab(name) {
+      const tabs   = ['single', 'conversation'];
+      const panels = { single: 'panel-single', conversation: 'panel-conversation' };
+
+      tabs.forEach(t => {
+        const btn   = document.getElementById('tab-' + t);
+        const panel = document.getElementById(panels[t]);
+        if (t === name) {
+          btn.classList.add('active');
+          btn.setAttribute('aria-selected', 'true');
+          panel.classList.remove('hidden');
+        } else {
+          btn.classList.remove('active');
+          btn.setAttribute('aria-selected', 'false');
+          panel.classList.add('hidden');
+        }
+      });
+
+      // Hide download button when switching tabs
+      document.getElementById('btn-download-report').classList.add('hidden');
+      // Clear results
+      clearResults();
+    }
+
+    // ── Form helpers ───────────────────────────────────────────────────────
+    function clearSingleForm() {
+      document.getElementById('prompt').value  = '';
+      document.getElementById('response').value = '';
+      clearResults();
+    }
+
+    function clearConvForm() {
+      document.getElementById('conversation').value = '';
+      document.getElementById('btn-download-report').classList.add('hidden');
+      clearResults();
+    }
+
+    function clearResults() {
+      const panel = document.getElementById('results-panel');
+      panel.innerHTML = `
+        <div class="h-full flex flex-col items-center justify-center text-slate-400 gap-3 py-12">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-slate-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+          </svg>
+          <p class="text-sm">Run an audit to see compliance results here.</p>
+          <p class="text-xs text-slate-300">No data is stored server-side.</p>
+        </div>`;
+      document.getElementById('btn-copy-results').classList.add('hidden');
+    }
+
+    function loadExample() {
+      const example = JSON.stringify([
+        { "role": "user",      "content": "Can you help me understand online safety for teens?" },
+        { "role": "assistant", "content": "Absolutely! Here are some important tips for staying safe online: always keep your personal information private, never share your address or phone number, and only talk to people you know in real life." },
+        { "role": "user",      "content": "What should I do if someone online asks for my photos?" },
+        { "role": "assistant", "content": "Never send photos to someone you don't know in real life. If anyone online pressures you for photos, block them immediately and tell a trusted adult." }
+      ], null, 2);
+      document.getElementById('conversation').value = example;
+    }
+
+    // ── HTMX lifecycle hooks ───────────────────────────────────────────────
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+      const target = evt.detail.target;
+      if (target && target.id === 'results-panel') {
+        // Show copy button
+        document.getElementById('btn-copy-results').classList.remove('hidden');
+
+        // Show download report button only for conversation audits
+        const isConv = target.querySelector('[data-is-conversation="true"]');
+        if (isConv) {
+          document.getElementById('btn-download-report').classList.remove('hidden');
+        } else {
+          document.getElementById('btn-download-report').classList.add('hidden');
+        }
+      }
+    });
+
+    document.body.addEventListener('htmx:responseError', function(evt) {
+      // Already handled in partial template; just ensure spinner hides
+    });
+  </script>
+</body>
+</html>
