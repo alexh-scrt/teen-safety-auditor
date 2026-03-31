@@ -22,100 +22,44 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from teen_safety_auditor import __version__
+from teen_safety_auditor.auditor import AuditEngine, OpenAICallError
 from teen_safety_auditor.main import create_app
 from teen_safety_auditor.models import (
-    AuditResult,
-    ConversationAuditResult,
     AuditReport,
     AuditReportSummary,
-    TurnAuditResult,
+    AuditResult,
     CategoryScore,
+    ConversationAuditResult,
+    TurnAuditResult,
 )
 from teen_safety_auditor.policy import PolicyCategory, RiskLevel
-from teen_safety_auditor.auditor import AuditEngine, OpenAICallError
-from teen_safety_auditor import __version__
+from tests.fixtures import (
+    FAKE_API_KEY,
+    make_all_safe_category_scores,
+    make_safe_audit_result,
+    make_safe_conversation_audit_result,
+    make_audit_report,
+    make_violation_audit_result,
+    make_violation_conversation_audit_result,
+    SAFE_PROMPT,
+    VIOLATION_PROMPT,
+)
 
 
 # ---------------------------------------------------------------------------
-# Test fixtures and helpers
+# Helper factories
 # ---------------------------------------------------------------------------
-
-FAKE_API_KEY = "sk-test-key-for-integration-tests"
-
-
-def _make_safe_audit_result() -> AuditResult:
-    """Build a minimal safe AuditResult for mocking."""
-    category_scores = [
-        CategoryScore(
-            category=cat,
-            score=0.05,
-            risk_level=RiskLevel.SAFE,
-        )
-        for cat in PolicyCategory
-    ]
-    return AuditResult(
-        prompt_snippet="Hello, how do I stay safe online?",
-        response_snippet=None,
-        category_scores=category_scores,
-        overall_score=0.05,
-        overall_risk_level=RiskLevel.SAFE,
-        flagged_categories=[],
-        reasoning="Content is benign.",
-    )
 
 
 def _make_safe_conversation_result() -> ConversationAuditResult:
     """Build a minimal safe ConversationAuditResult for mocking."""
-    category_scores = [
-        CategoryScore(category=cat, score=0.05, risk_level=RiskLevel.SAFE)
-        for cat in PolicyCategory
-    ]
-    turn = TurnAuditResult(
-        turn_index=0,
-        role="user",
-        content_snippet="Hello!",
-        category_scores=category_scores,
-        overall_score=0.05,
-        overall_risk_level=RiskLevel.SAFE,
-        flagged_categories=[],
-        reasoning="Content is safe.",
-    )
-    return ConversationAuditResult(
-        turn_results=[turn],
-        total_turns=1,
-        flagged_turns=0,
-        overall_score=0.05,
-        overall_risk_level=RiskLevel.SAFE,
-        most_flagged_categories=[],
-    )
+    return make_safe_conversation_audit_result(num_turns=1)
 
 
 def _make_safe_audit_report(conv_result: ConversationAuditResult) -> AuditReport:
     """Build a minimal AuditReport for mocking."""
-    import uuid
-    from datetime import datetime, timezone
-
-    summary = AuditReportSummary(
-        total_turns=conv_result.total_turns,
-        flagged_turns=conv_result.flagged_turns,
-        safe_turns=conv_result.total_turns,
-        violation_turns=0,
-        caution_turns=0,
-        overall_score=conv_result.overall_score,
-        overall_risk_level=conv_result.overall_risk_level,  # type: ignore[arg-type]
-        most_flagged_categories=[],
-        compliance_rate=100.0,
-    )
-    return AuditReport(
-        report_id=str(uuid.uuid4()),
-        generated_at=datetime.now(timezone.utc),
-        schema_version="1.0",
-        summary=summary,
-        flagged_turns=[],
-        all_turn_results=conv_result.turn_results,
-        tool_version=__version__,
-        metadata={},
-    )
+    return make_audit_report(conv_result=conv_result)
 
 
 def _make_test_client(
@@ -146,12 +90,10 @@ def _make_test_client(
     audit_report_side_effect:
         Exception to raise from ``engine.build_report``.
     """
-    app = create_app()
-
     if not engine_ready:
-        # Override lifespan by directly patching state after creation
-        # We use the TestClient context manager to handle lifespan
-        with TestClient(app, raise_server_exceptions=True) as client:
+        app = create_app()
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
+            client = TestClient(app, raise_server_exceptions=False)
             client.app.state.engine = None  # type: ignore[union-attr]
             return client
 
@@ -162,7 +104,7 @@ def _make_test_client(
         mock_engine.audit_prompt = AsyncMock(side_effect=audit_prompt_side_effect)
     else:
         mock_engine.audit_prompt = AsyncMock(
-            return_value=audit_prompt_result or _make_safe_audit_result()
+            return_value=audit_prompt_result or make_safe_audit_result()
         )
 
     if audit_conversation_side_effect is not None:
@@ -182,11 +124,9 @@ def _make_test_client(
             return_value=audit_report_result or _make_safe_audit_report(safe_conv)
         )
 
-    # Patch OPENAI_API_KEY so lifespan does not fail to build a real engine,
-    # then override state.engine after startup.
     with patch.dict("os.environ", {"OPENAI_API_KEY": FAKE_API_KEY}):
         with patch("teen_safety_auditor.main.create_engine", return_value=mock_engine):
-            client = TestClient(app, raise_server_exceptions=False)
+            client = TestClient(create_app(), raise_server_exceptions=False)
             return client
 
 
@@ -227,6 +167,18 @@ class TestHealthCheck:
         resp = client.get("/health")
         assert resp.json()["engine_ready"] is True
 
+    def test_health_timestamp_is_string(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/health")
+        ts = resp.json()["timestamp"]
+        assert isinstance(ts, str)
+        assert len(ts) > 0
+
+    def test_health_content_type_json(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/health")
+        assert "application/json" in resp.headers["content-type"]
+
 
 # ---------------------------------------------------------------------------
 # Main UI
@@ -249,7 +201,19 @@ class TestMainUI:
     def test_index_contains_html_tag(self) -> None:
         client = _make_test_client()
         resp = client.get("/")
-        assert "<html" in resp.text.lower() or "<!doctype" in resp.text.lower()
+        body_lower = resp.text.lower()
+        assert "<html" in body_lower or "<!doctype" in body_lower
+
+    def test_index_contains_teen_safety(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/")
+        assert "teen" in resp.text.lower() or "safety" in resp.text.lower()
+
+    def test_index_contains_version(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/")
+        # version is rendered somewhere in the page
+        assert __version__ in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +246,7 @@ class TestAuditPromptEndpoint:
         assert "flagged_categories" in data
 
     def test_safe_result_has_safe_risk_level(self) -> None:
-        safe_result = _make_safe_audit_result()
+        safe_result = make_safe_audit_result()
         client = _make_test_client(audit_prompt_result=safe_result)
         resp = client.post(
             "/api/audit/prompt",
@@ -290,6 +254,16 @@ class TestAuditPromptEndpoint:
         )
         assert resp.status_code == 200
         assert resp.json()["overall_risk_level"] == "safe"
+
+    def test_violation_result_has_violation_risk_level(self) -> None:
+        violation_result = make_violation_audit_result()
+        client = _make_test_client(audit_prompt_result=violation_result)
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": VIOLATION_PROMPT},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["overall_risk_level"] == "violation"
 
     def test_with_optional_response_field(self) -> None:
         client = _make_test_client()
@@ -375,6 +349,53 @@ class TestAuditPromptEndpoint:
             json={"prompt": "Test"},
         )
         assert resp.status_code == 500
+
+    def test_prompt_snippet_in_response(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": SAFE_PROMPT},
+        )
+        data = resp.json()
+        assert "prompt_snippet" in data
+        assert isinstance(data["prompt_snippet"], str)
+        assert len(data["prompt_snippet"]) > 0
+
+    def test_response_snippet_none_when_not_provided(self) -> None:
+        safe_result = make_safe_audit_result(prompt=SAFE_PROMPT, response=None)
+        client = _make_test_client(audit_prompt_result=safe_result)
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": SAFE_PROMPT},
+        )
+        data = resp.json()
+        assert data["response_snippet"] is None
+
+    def test_flagged_categories_is_list(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "Hello!"},
+        )
+        data = resp.json()
+        assert isinstance(data["flagged_categories"], list)
+
+    def test_overall_score_is_float(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "Hello!"},
+        )
+        data = resp.json()
+        assert isinstance(data["overall_score"], float)
+
+    def test_prompt_too_long_returns_422(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "x" * 32_001},
+        )
+        assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +501,60 @@ class TestAuditConversationEndpoint:
         resp = client.post("/api/audit/conversation", json=self._valid_body)
         assert resp.json()["total_turns"] == result.total_turns
 
+    def test_flagged_turns_is_integer(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/conversation", json=self._valid_body)
+        data = resp.json()
+        assert isinstance(data["flagged_turns"], int)
+
+    def test_turn_results_is_list(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/conversation", json=self._valid_body)
+        data = resp.json()
+        assert isinstance(data["turn_results"], list)
+
+    def test_overall_score_is_float(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/conversation", json=self._valid_body)
+        data = resp.json()
+        assert isinstance(data["overall_score"], float)
+
+    def test_violation_result_reflected_in_response(self) -> None:
+        violation_result = make_violation_conversation_audit_result()
+        client = _make_test_client(audit_conversation_result=violation_result)
+        resp = client.post("/api/audit/conversation", json=self._valid_body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["flagged_turns"] > 0
+
+    def test_system_turn_in_conversation_accepted(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/conversation",
+            json={
+                "turns": [
+                    {"role": "system", "content": "You are helpful."},
+                    {"role": "user", "content": "Tell me something."},
+                ]
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_too_many_turns_returns_422(self) -> None:
+        client = _make_test_client()
+        turns = [{"role": "user", "content": f"Message {i}"} for i in range(101)]
+        resp = client.post("/api/audit/conversation", json={"turns": turns})
+        assert resp.status_code == 422
+
+    def test_openai_error_detail_present(self) -> None:
+        client = _make_test_client(
+            audit_conversation_side_effect=OpenAICallError("Connection refused")
+        )
+        resp = client.post("/api/audit/conversation", json=self._valid_body)
+        assert resp.status_code == 500
+        detail = resp.json().get("detail", "")
+        assert "Connection refused" in detail
+
 
 # ---------------------------------------------------------------------------
 # POST /api/audit/report
@@ -583,6 +658,61 @@ class TestAuditReportEndpoint:
         assert "tool_version" in data
         assert len(data["tool_version"]) > 0
 
+    def test_generated_at_in_report(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        data = resp.json()
+        assert "generated_at" in data
+        assert data["generated_at"] is not None
+
+    def test_flagged_turns_is_list(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        data = resp.json()
+        assert isinstance(data["flagged_turns"], list)
+
+    def test_all_turn_results_is_list(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        data = resp.json()
+        assert isinstance(data["all_turn_results"], list)
+
+    def test_summary_has_expected_fields(self) -> None:
+        client = _make_test_client()
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        summary = resp.json()["summary"]
+        assert "total_turns" in summary
+        assert "flagged_turns" in summary
+        assert "overall_score" in summary
+        assert "overall_risk_level" in summary
+        assert "compliance_rate" in summary
+
+    def test_no_user_turn_returns_422(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/report",
+            json={"turns": [{"role": "assistant", "content": "Hi"}]},
+        )
+        assert resp.status_code == 422
+
+    def test_openai_error_detail_present(self) -> None:
+        client = _make_test_client(
+            audit_report_side_effect=OpenAICallError("Rate limited")
+        )
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        assert resp.status_code == 500
+        detail = resp.json().get("detail", "")
+        assert "Rate limited" in detail
+
+    def test_violation_report_has_flagged_turns(self) -> None:
+        violation_conv = make_violation_conversation_audit_result()
+        violation_report = make_audit_report(conv_result=violation_conv)
+        client = _make_test_client(audit_report_result=violation_report)
+        resp = client.post("/api/audit/report", json=self._valid_body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"]["flagged_turns"] > 0
+
 
 # ---------------------------------------------------------------------------
 # POST /htmx/audit/prompt
@@ -639,6 +769,47 @@ class TestHtmxAuditPrompt:
             data={"prompt": "Question", "response": "Answer"},
         )
         assert resp.status_code == 200
+
+    def test_whitespace_only_prompt_returns_422(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/htmx/audit/prompt",
+            data={"prompt": "   "},
+        )
+        assert resp.status_code == 422
+
+    def test_response_body_contains_html_elements(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/htmx/audit/prompt",
+            data={"prompt": "Safe question"},
+        )
+        assert resp.status_code == 200
+        # Should contain some HTML structure from the result_card template
+        assert "<" in resp.text
+
+    def test_error_state_html_on_openai_failure(self) -> None:
+        client = _make_test_client(
+            audit_prompt_side_effect=OpenAICallError("Quota exceeded")
+        )
+        resp = client.post(
+            "/htmx/audit/prompt",
+            data={"prompt": "Test"},
+        )
+        assert resp.status_code == 500
+        # Error should appear in the HTML response
+        assert "Quota exceeded" in resp.text or "error" in resp.text.lower()
+
+    def test_unexpected_error_returns_500_html(self) -> None:
+        client = _make_test_client(
+            audit_prompt_side_effect=RuntimeError("Crash!")
+        )
+        resp = client.post(
+            "/htmx/audit/prompt",
+            data={"prompt": "Test"},
+        )
+        assert resp.status_code == 500
+        assert "text/html" in resp.headers["content-type"]
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +891,64 @@ class TestHtmxAuditConversation:
         )
         assert resp.status_code == 422
 
+    def test_invalid_role_returns_422(self) -> None:
+        client = _make_test_client()
+        bad_conv = json.dumps([{"role": "bot", "content": "Hello"}])
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": bad_conv},
+        )
+        assert resp.status_code == 422
+
+    def test_error_message_in_html_on_invalid_json(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": "bad json!!!"},
+        )
+        assert resp.status_code == 422
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_openai_error_message_in_html(self) -> None:
+        client = _make_test_client(
+            audit_conversation_side_effect=OpenAICallError("Timeout occurred")
+        )
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": self._valid_conversation_json},
+        )
+        assert resp.status_code == 500
+        assert "Timeout occurred" in resp.text or "error" in resp.text.lower()
+
+    def test_unexpected_error_returns_500_html(self) -> None:
+        client = _make_test_client(
+            audit_conversation_side_effect=RuntimeError("Internal crash")
+        )
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": self._valid_conversation_json},
+        )
+        assert resp.status_code == 500
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_single_user_turn_accepted(self) -> None:
+        client = _make_test_client()
+        single_turn = json.dumps([{"role": "user", "content": "Just a user message."}])
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": single_turn},
+        )
+        assert resp.status_code == 200
+
+    def test_response_contains_html_structure(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": self._valid_conversation_json},
+        )
+        assert resp.status_code == 200
+        assert "<" in resp.text
+
 
 # ---------------------------------------------------------------------------
 # Engine unavailable (missing API key)
@@ -731,13 +960,8 @@ class TestEngineUnavailable:
 
     def _make_unavailable_client(self) -> TestClient:
         """Create a TestClient where the engine is explicitly None."""
-        app = create_app()
-        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
-            with patch("teen_safety_auditor.main.create_engine", side_effect=Exception("No key")):
-                client = TestClient(app, raise_server_exceptions=False)
-                # Force engine to None after startup
-                client.app.state.engine = None  # type: ignore[union-attr]
-                return client
+        client = _make_test_client(engine_ready=False)
+        return client
 
     def test_audit_prompt_503_when_no_engine(self) -> None:
         client = self._make_unavailable_client()
@@ -762,6 +986,31 @@ class TestEngineUnavailable:
             json={"turns": [{"role": "user", "content": "Hi"}]},
         )
         assert resp.status_code == 503
+
+    def test_health_still_returns_200_when_no_engine(self) -> None:
+        client = self._make_unavailable_client()
+        resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_health_engine_ready_false_when_no_engine(self) -> None:
+        client = self._make_unavailable_client()
+        resp = client.get("/health")
+        assert resp.json()["engine_ready"] is False
+
+    def test_index_still_accessible_when_no_engine(self) -> None:
+        client = self._make_unavailable_client()
+        resp = client.get("/")
+        assert resp.status_code == 200
+
+    def test_503_detail_message_present(self) -> None:
+        client = self._make_unavailable_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "Test"},
+        )
+        assert resp.status_code == 503
+        detail = resp.json().get("detail", "")
+        assert len(detail) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +1061,17 @@ class TestAppMetadata:
         paths = resp.json()["paths"]
         assert "/api/audit/report" in paths
 
+    def test_health_route_in_schema(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/openapi.json")
+        paths = resp.json()["paths"]
+        assert "/health" in paths
+
+    def test_redoc_accessible(self) -> None:
+        client = _make_test_client()
+        resp = client.get("/redoc")
+        assert resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # create_app factory
@@ -837,5 +1097,109 @@ class TestCreateApp:
 
     def test_app_has_state(self) -> None:
         app = create_app()
-        # State container should be attached
         assert hasattr(app, "state")
+
+    def test_app_has_routes(self) -> None:
+        app = create_app()
+        route_paths = [str(route.path) for route in app.routes]  # type: ignore[attr-defined]
+        assert "/" in route_paths
+        assert "/health" in route_paths
+
+    def test_multiple_create_app_calls_independent(self) -> None:
+        """Each call to create_app returns a fresh FastAPI instance."""
+        from fastapi import FastAPI
+
+        app1 = create_app()
+        app2 = create_app()
+        assert app1 is not app2
+        assert isinstance(app1, FastAPI)
+        assert isinstance(app2, FastAPI)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases and additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeCases:
+    """Edge case and boundary tests."""
+
+    def test_prompt_at_max_length_accepted(self) -> None:
+        client = _make_test_client()
+        # 32,000 chars is the max allowed
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "a" * 32_000},
+        )
+        # Should pass validation (200 or forwarded to mock engine)
+        assert resp.status_code == 200
+
+    def test_conversation_with_exactly_100_turns_accepted(self) -> None:
+        client = _make_test_client()
+        turns = [{"role": "user", "content": f"Message {i}"} for i in range(100)]
+        resp = client.post("/api/audit/conversation", json={"turns": turns})
+        assert resp.status_code == 200
+
+    def test_conversation_role_normalisation(self) -> None:
+        """Roles with different casing should be normalised and accepted."""
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/conversation",
+            json={"turns": [{"role": "User", "content": "Hello"}]},
+        )
+        # Role 'User' should normalise to 'user' and pass validation
+        assert resp.status_code == 200
+
+    def test_audit_prompt_with_unicode_content(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/prompt",
+            json={"prompt": "Hola, \u00bfc\u00f3mo est\u00e1s? \U0001f600"},
+        )
+        assert resp.status_code == 200
+
+    def test_audit_conversation_with_unicode_content(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/conversation",
+            json={
+                "turns": [
+                    {"role": "user", "content": "\u4f60\u597d\uff01 How are you?"},
+                    {"role": "assistant", "content": "I'm fine, thank you! \U0001f44d"},
+                ]
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_report_filename_contains_timestamp(self) -> None:
+        """The downloaded report filename should contain a timestamp component."""
+        client = _make_test_client()
+        resp = client.post(
+            "/api/audit/report",
+            json={"turns": [{"role": "user", "content": "Test"}]},
+        )
+        assert resp.status_code == 200
+        cd = resp.headers.get("content-disposition", "")
+        # Should contain digits indicating a timestamp
+        import re
+        assert re.search(r"\d{8}", cd) or "teen_safety_audit" in cd
+
+    def test_htmx_prompt_with_long_prompt_accepted(self) -> None:
+        client = _make_test_client()
+        resp = client.post(
+            "/htmx/audit/prompt",
+            data={"prompt": "A" * 1000},
+        )
+        assert resp.status_code == 200
+
+    def test_htmx_conversation_with_system_turn(self) -> None:
+        client = _make_test_client()
+        conv = json.dumps([
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is 2+2?"},
+        ])
+        resp = client.post(
+            "/htmx/audit/conversation",
+            data={"conversation": conv},
+        )
+        assert resp.status_code == 200
