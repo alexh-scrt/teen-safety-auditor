@@ -1,191 +1,181 @@
-# Teen Safety Auditor
+# Teen Safety Auditor 🛡️
+> Audit AI prompts and conversations against OpenAI teen safety policies — before your app ships.
 
-A developer-focused web tool that lets you test AI application prompts and
-conversation flows against OpenAI's teen safety policy guidelines using the
-`gpt-4o-mini` model as a safety evaluator.
-
-Paste individual prompts or multi-turn conversations, and the tool:
-
-- **Scores** each response for policy compliance
-- **Highlights** risky outputs with colour-coded severity levels (Safe / Caution / Violation)
-- **Generates** a downloadable JSON audit report
-
-This helps app builders quickly identify child-safety policy violations before
-shipping their AI products to younger audiences.
-
----
-
-## Table of Contents
-
-1. [Quick Start](#quick-start)
-2. [Configuration](#configuration)
-3. [Usage](#usage)
-4. [API Reference](#api-reference)
-5. [Policy Categories](#policy-categories)
-6. [Running Tests](#running-tests)
-7. [Project Structure](#project-structure)
-8. [Policy Reference Links](#policy-reference-links)
-9. [License](#license)
+Teen Safety Auditor is a developer-focused web tool that lets you test AI application prompts and conversation flows against OpenAI's teen safety policy guidelines. Paste individual prompts or multi-turn conversations, and the tool scores each response for policy compliance, highlights risky outputs with color-coded severity levels, and generates a downloadable audit report. Built for app developers who need to identify child-safety policy violations before shipping AI products to younger audiences.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11 or later
-- An [OpenAI API key](https://platform.openai.com/account/api-keys)
-
-### Installation
-
 ```bash
-# 1. Clone the repository
-git clone https://github.com/example/teen_safety_auditor.git
+# 1. Clone the repo
+git clone https://github.com/your-org/teen_safety_auditor.git
 cd teen_safety_auditor
 
 # 2. Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate.bat     # Windows CMD
-# .venv\Scripts\Activate.ps1    # Windows PowerShell
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Copy the example environment file and add your API key
+# 4. Configure your environment
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY=sk-...
+# Edit .env and set your OPENAI_API_KEY
+
+# 5. Start the server
+uvicorn teen_safety_auditor.main:app --reload
 ```
 
-### Start the server
+Open your browser to **http://127.0.0.1:8000** — the audit UI is ready.
+
+---
+
+## Features
+
+- **Single-prompt & multi-turn auditing** — Evaluate individual prompt/response pairs or full conversation arrays against OpenAI's teen safety policy categories (sexual content, self-harm, grooming, and more).
+- **Color-coded risk scoring** — Each turn receives a clear **Safe** 🟢 / **Caution** 🟡 / **Violation** 🔴 classification per policy category, so problem areas are obvious at a glance.
+- **Batch conversation mode** — Paste a JSON conversation array and get a per-turn compliance breakdown in a single request.
+- **Downloadable audit reports** — Export a structured JSON report summarizing all flagged turns, category scores, and remediation hints.
+- **Zero-persistence design** — No prompts are stored server-side. Your test data stays private.
+
+---
+
+## Usage Examples
+
+### Web UI
+
+Navigate to `http://127.0.0.1:8000`, paste your prompt and response into the form, and click **Audit**. Results appear inline with color-coded badges per policy category.
+
+### REST API — Single Prompt
 
 ```bash
-python -m teen_safety_auditor.main
-# or via the installed script:
-teen-safety-auditor
+curl -X POST http://127.0.0.1:8000/api/audit/prompt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "What is the best way to make new friends at school?",
+    "response": "Try joining clubs that match your interests!"
+  }'
 ```
 
-Open your browser at **http://localhost:8000**.
+**Response:**
+```json
+{
+  "overall_risk_level": "safe",
+  "overall_score": 0.05,
+  "category_scores": [
+    {
+      "category": "sexual_content",
+      "score": 0.01,
+      "risk_level": "safe",
+      "label": "Sexual Content"
+    },
+    {
+      "category": "self_harm",
+      "score": 0.02,
+      "risk_level": "safe",
+      "label": "Self-Harm"
+    }
+  ],
+  "flagged_categories": [],
+  "remediation_hints": []
+}
+```
+
+### REST API — Multi-Turn Conversation
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/audit/conversation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "turns": [
+      {"role": "user",      "content": "Hi, I need some advice."},
+      {"role": "assistant", "content": "Of course! What's on your mind?"},
+      {"role": "user",      "content": "I've been feeling really down lately."},
+      {"role": "assistant", "content": "I'm sorry to hear that. Have you talked to a trusted adult?"}
+    ]
+  }'
+```
+
+### REST API — Download Audit Report
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/audit/report \
+  -H "Content-Type: application/json" \
+  -d '{ "prompt": "...", "response": "..." }' \
+  -o audit_report.json
+```
+
+### Health Check
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"status": "ok"}
+```
+
+---
+
+## Project Structure
+
+```
+teen_safety_auditor/
+├── pyproject.toml                          # Project metadata and dependency config
+├── requirements.txt                        # Pinned pip dependencies
+├── .env.example                            # Environment variable template
+├── README.md
+│
+├── teen_safety_auditor/
+│   ├── __init__.py                         # Package init, version, and key exports
+│   ├── main.py                             # FastAPI app factory, routes, and server entrypoint
+│   ├── auditor.py                          # Core auditing engine (OpenAI calls, scoring, classification)
+│   ├── models.py                           # Pydantic request/response models
+│   ├── policy.py                           # Policy categories, thresholds, and system prompt templates
+│   │
+│   ├── templates/
+│   │   ├── index.html                      # Main single-page UI
+│   │   └── partials/
+│   │       └── result_card.html            # HTMX partial for per-turn result cards
+│   │
+│   └── static/
+│       └── app.js                          # Clipboard copy, report export, UI polish
+│
+└── tests/
+    ├── __init__.py
+    ├── fixtures.py                         # Shared fixtures and mock data
+    ├── test_auditor.py                     # Unit tests for auditing logic
+    ├── test_api.py                         # Integration tests for FastAPI endpoints
+    ├── test_models.py                      # Unit tests for Pydantic models
+    └── test_policy.py                      # Unit tests for policy config
+```
 
 ---
 
 ## Configuration
 
-Create a `.env` file in the project root (copy from `.env.example`):
+Copy `.env.example` to `.env` and set your values:
 
 ```dotenv
+# .env
+
 # Required
 OPENAI_API_KEY=sk-your-key-here
 
 # Optional — override defaults
-OPENAI_MODEL=gpt-4o-mini          # Model used for safety evaluation
-SAFEGUARD_MODEL=gpt-4o-mini       # Alias used internally
-HOST=0.0.0.0                      # Bind address (default: 127.0.0.1)
-PORT=8000                          # Bind port    (default: 8000)
-DEBUG=false                        # Enable Uvicorn reload (default: false)
+OPENAI_MODEL=gpt-4o-mini       # Model used for safety evaluation
+SAFEGUARD_MODEL=gpt-4o-mini    # Safeguard model (can differ from main model)
+HOST=127.0.0.1                 # Server bind address
+PORT=8000                      # Server port
+DEBUG=false                    # Enable FastAPI debug mode
 ```
 
-> **Note:** No prompts or conversation content are ever persisted server-side.
-> All data lives in memory for the duration of a single request.
-
----
-
-## Usage
-
-### Single-Prompt Audit
-
-1. Navigate to the home page.
-2. Paste your prompt (and optionally the AI response) into the **Single Prompt** tab.
-3. Click **Audit** — results appear inline without a page reload (powered by HTMX).
-
-### Multi-Turn Conversation Audit
-
-1. Switch to the **Conversation** tab.
-2. Paste a JSON array of message objects following the OpenAI chat format:
-
-```json
-[
-  { "role": "user",      "content": "Tell me about online safety." },
-  { "role": "assistant", "content": "Sure! Here are some tips..." }
-]
-```
-
-3. Click **Audit Conversation** to receive a per-turn compliance breakdown.
-
-### Downloading the Audit Report
-
-After any audit, click **Download Report** to save a JSON file containing:
-
-- Per-turn scores and risk levels
-- Flagged categories with descriptions
-- Remediation hints for each violation
-- Overall compliance summary
-
----
-
-## API Reference
-
-All endpoints accept and return JSON.
-
-### `POST /api/audit/prompt`
-
-Audit a single prompt/response pair.
-
-**Request body:**
-
-```json
-{
-  "prompt": "string",
-  "response": "string (optional)"
-}
-```
-
-**Response:** `AuditResult` object (see `teen_safety_auditor/models.py`).
-
----
-
-### `POST /api/audit/conversation`
-
-Audit a multi-turn conversation.
-
-**Request body:**
-
-```json
-{
-  "turns": [
-    { "role": "user",      "content": "..." },
-    { "role": "assistant", "content": "..." }
-  ]
-}
-```
-
-**Response:** `ConversationAuditResult` object.
-
----
-
-### `POST /api/audit/report`
-
-Generate and return a downloadable JSON audit report from a full conversation.
-Returns `Content-Disposition: attachment` so browsers trigger a file save.
-
----
-
-## Policy Categories
-
-The auditor evaluates content across the following teen-safety categories:
-
-| Category | Description |
-|---|---|
-| `sexual_content` | Explicit or suggestive sexual material |
-| `self_harm` | Content promoting self-injury or suicide |
-| `grooming` | Manipulative relationship-building with minors |
-| `violence` | Graphic violence or threats |
-| `dangerous_activities` | Instructions for illegal or physically dangerous acts |
-| `substance_abuse` | Promotion of drug, alcohol, or substance misuse |
-| `privacy_violation` | Eliciting or exposing personal identifying information |
-| `hate_speech` | Discriminatory or harassing content |
-
-Risk levels and thresholds are defined in `teen_safety_auditor/policy.py`.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `OPENAI_API_KEY` | ✅ Yes | — | Your OpenAI API key |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Model used for evaluation |
+| `SAFEGUARD_MODEL` | No | `gpt-4o-mini` | Safeguard evaluator model |
+| `HOST` | No | `127.0.0.1` | Server bind host |
+| `PORT` | No | `8000` | Server port |
+| `DEBUG` | No | `false` | Enable debug mode |
 
 ---
 
@@ -198,50 +188,19 @@ pytest
 # Run with verbose output
 pytest -v
 
-# Run only unit tests
-pytest tests/test_auditor.py -v
-
-# Run only API integration tests
-pytest tests/test_api.py -v
+# Run a specific test file
+pytest tests/test_auditor.py
+pytest tests/test_api.py
 ```
 
----
-
-## Project Structure
-
-```
-teen_safety_auditor/
-├── __init__.py          # Package version and key exports
-├── main.py              # FastAPI app factory and Uvicorn entrypoint
-├── auditor.py           # Core auditing engine (OpenAI calls + scoring)
-├── models.py            # Pydantic request/response models
-├── policy.py            # Policy categories, thresholds, system prompts
-├── templates/
-│   ├── index.html       # Main single-page UI
-│   └── partials/
-│       └── result_card.html  # HTMX partial result card
-└── static/
-    └── app.js           # Clipboard, export, and UI polish
-tests/
-├── fixtures.py          # Shared test fixtures
-├── test_auditor.py      # Auditor unit tests
-└── test_api.py          # FastAPI integration tests
-pyproject.toml
-requirements.txt
-README.md
-```
-
----
-
-## Policy Reference Links
-
-- [OpenAI Usage Policies](https://openai.com/policies/usage-policies)
-- [OpenAI Safety Best Practices](https://platform.openai.com/docs/guides/safety-best-practices)
-- [OpenAI Moderation Guide](https://platform.openai.com/docs/guides/moderation)
-- [Child Safety Policy](https://openai.com/policies/usage-policies#child-safety)
+All tests mock OpenAI API calls — no real API requests or costs are incurred during testing.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+*Built with [Jitter](https://github.com/jitter-ai) - an AI agent that ships code daily.*
